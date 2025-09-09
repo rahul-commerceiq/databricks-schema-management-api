@@ -1,0 +1,62 @@
+#!/bin/bash
+
+current_branch=$(git rev-parse --abbrev-ref HEAD)
+echo "current_branch: $current_branch"
+
+changed_files=$(git diff --name-only "origin/$current_branch"..HEAD)
+
+for file in $changed_files; do
+  if [[ $file == *.java && $file != *Test.java ]]; then
+    base_name=$(basename "$file" .java)
+    test_dir=$(dirname "$file" | sed 's|src/main/java|src/test/java|')
+    test_file_path="${test_dir}/${base_name}Test.java"
+    if [[ $base_name == *Impl ]]; then
+      base_name_without_impl=${base_name%Impl}
+      test_file_path_without_impl="${test_dir}/${base_name_without_impl}Test.java"
+    fi
+    if [[ ! -f $test_file_path ]] && [[ ! -f $test_file_path_without_impl ]]; then
+      echo "Missing unit test for $file. Please add a test at $test_file_path or $test_file_path_without_impl."
+      exit 1
+    fi
+  fi
+done
+
+repo_root=$(git rev-parse --show-toplevel)
+
+if [[ -z "$repo_root" ]]; then
+  echo "Error: Not inside a Git repository."
+  exit 1
+fi
+
+find "$repo_root" -name "pom.xml" -exec dirname {} \; | while read -r dir; do
+  echo "Processing directory: $dir"
+
+  cd "$dir" || { echo "Failed to cd into $dir"; continue; }
+
+  mvn clean verify jacoco:report
+
+  if [ $? -ne 0 ]; then
+    echo "Maven build failed in $dir. Aborting further processing."
+    exit 1
+  fi
+
+done
+
+if [ $? -ne 0 ]; then
+  BASE_PATH=$(pwd)
+  printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------"
+  printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------"
+  printf "\033[1;31m%s\033[0m\n" "#####################################################"
+  printf "\033[1;31m%s\033[0m\n" "# unit tests / coverage test failed. Aborting push. #"
+  printf "\033[1;31m%s\033[0m\n" "#####################################################"
+  printf "\033[1;31m%s\033[0m\n" "For Unit Test failure, please refer: ${BASE_PATH}/target/surefire-reports "
+  printf "\033[1;31m%s\033[0m\n" "For Code Coverage failure, please refer: ${BASE_PATH}/target/site/jacoco "
+  printf "\033[1;31m%s\033[0m\n" "Relevant Files for Coverage Test: "
+  printf "%s\n" "${BASE_PATH}/target/site/jacoco/index.html "
+  printf "%s\n" "${BASE_PATH}/target/site/jacoco/jacoco.xml "
+  printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------"
+  printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------"
+  exit 1
+fi
+
+echo "All changed Java files have corresponding unit tests, all tests passed, and code coverage is above the threshold. Proceeding with push."

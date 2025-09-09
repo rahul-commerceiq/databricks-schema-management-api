@@ -1,0 +1,109 @@
+@Library('commerceiq')
+//@Library('pipeline-utility-steps')
+
+import com.commerceiq.jenkins.*
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import org.apache.commons.io.IOUtils
+
+productName = 'infra'
+buildName = 'databricks-schema-management-tool'
+accountNumber = "208876916689"
+nodeLabel = "Venom-on-demand-slave"
+
+productFolder = productName
+
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['beta', 'qa' ,'prod'], description: 'Select environment: beta, qa  or prod')
+    }
+    options {
+            lock('databricks-schema-migration-lock')  // Acquire a lock for this pipeline
+    }
+
+    stages {
+        stage('Databricks Schema Migrate API') {
+            steps {
+                script {
+                    def apiUrl
+                    def action
+
+                    if (params.ENVIRONMENT == 'beta') {
+                        apiUrl = 'http://databricks-schema-management-api.beta-dbx.commerceiq.ai'
+                    }else if(params.ENVIRONMENT == 'qa'){
+                        apiUrl = 'http://databricks-schema-management-api.qa-dbx.commerceiq.ai'
+                     }else {
+                        apiUrl = 'http://databricks-schema-management-api.prod-dbx.commerceiq.ai'
+                    }
+                        // Retrieve data from API to populate the dropdown
+
+                    def apiResponse = sh(script: "curl -s ${apiUrl}/schemaManagement/v1/non-migrated-files", returnStdout: true).trim()
+
+                    // Parse the JSON response
+                    def jsonSlurper = new groovy.json.JsonSlurper()
+                    def parsedData = jsonSlurper.parseText(apiResponse)
+
+                    // Extract filePaths from the nested JSON
+                    def filePaths = parsedData.filePaths
+
+                    // Create a list of dropdown choices
+                    def dropdownChoices = filePaths.collect { filePath ->
+                        filePath
+                    }
+
+                    // Print the dropdown choices for debugging
+                    echo "Dropdown Choices: ${dropdownChoices}"
+
+                     // Display input dropdown for migration
+                    def selectedOption = input message: 'Select migration option:', parameters: [
+                        choice(name: 'MIGRATION_OPTION', choices: dropdownChoices, description: 'Select file to migrate')
+                    ]
+
+                    echo "Selected Option: ${selectedOption}"
+                    // curl post json payload
+
+                    def buildCause = currentBuild.getBuildCauses()[0]
+                    def buildTriggerBy = java.net.URLEncoder.encode(buildCause.shortDescription.replace("Started by user ",""), "UTF-8")
+
+                    echo "BUILD_TRIGGER_BY: ${buildTriggerBy}"
+
+                    def jobUrl = java.net.URLEncoder.encode(env.BUILD_URL, "UTF-8")
+
+                    def migrationBaseUrl = "${apiUrl}/schemaManagement/v1/migrate?userName=${buildTriggerBy}&jobUrl=${jobUrl}"
+
+                    echo "MIGRATION URL: ${migrationBaseUrl}"
+
+                    def migrationApiResponse = sh(script: "curl -X POST '${migrationBaseUrl}' -H 'Content-Type: application/json' -d '{\"files\": [\"${selectedOption}\"]}'", returnStdout: true).trim()
+                        // Parse the JSON response
+                    def jsonResponse = new groovy.json.JsonSlurper().parseText(migrationApiResponse)
+                    echo "API Response: ${jsonResponse}"
+                    // Check the status in the JSON response
+                    if (jsonResponse.status == 'Failed') {
+                        error "Migration failed"
+                    } else if (jsonResponse.status == 'Success') {
+                        echo "Migration succeeded"
+                    } else {
+                        error "Unexpected status in API response"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo "Pipeline failed! Notify the team."
+            // You can add additional failure handling steps here
+        }
+
+        success {
+            echo "Pipeline succeeded! Notify the team."
+            // You can add additional success handling steps here
+        }
+    }
+}
+
+
