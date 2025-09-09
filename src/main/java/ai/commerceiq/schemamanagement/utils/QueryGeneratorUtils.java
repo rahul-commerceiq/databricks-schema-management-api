@@ -89,8 +89,10 @@ public class QueryGeneratorUtils {
     List<QueryDetailsModel> explainQueryList = new ArrayList<>();
     for (CreateTableModel createTableObject : createTableChangeSet.getChangeSets()) {
       List<String> absentRequiredFields = new ArrayList<>();
+      String[] tableNamePartitions = createTableObject.getTableName().split("\\.");
+      String catalog = tableNamePartitions.length == 3 ? tableNamePartitions[0] : "";
       Map<String, Object> columnsDetailsMap = generateTableColumns(createTableObject.getColumns(),
-          absentRequiredFields);
+          absentRequiredFields, catalog);
 
       //handle failed cases here
       if (!absentRequiredFields.isEmpty()) {
@@ -107,16 +109,15 @@ public class QueryGeneratorUtils {
                 createTableObject.getId()));
         continue;
       }
-      if ((Boolean) columnsDetailsMap.get(StringConstants.HAS_PARTITION_WITH_OUT_CLIENT_ID)) {
+      
+      // Extract catalog from table name to check if it's common_catalog
+      boolean isCommonCatalog = StringConstants.COMMON_CATALOG.equalsIgnoreCase(catalog);
+      
+      // Only enforce client_id partition requirement for non-common_catalog tables
+      if ((Boolean) columnsDetailsMap.get(StringConstants.HAS_PARTITION_WITH_OUT_CLIENT_ID) && !isCommonCatalog) {
         explainQueryList.add(
             failedQueryDetailsModel(StringConstants.HAS_PARTITION_WITH_OUT_CLIENT_ID_ERROR,
                 createTableObject.getId()));
-        continue;
-      }
-      String[] tableNamePartitions = createTableObject.getTableName().split("\\.");
-      if (tableNamePartitions.length != 3) {
-        explainQueryList.add(failedQueryDetailsModel(StringConstants.INVALID_TABLE_NAME_ERROR,
-            createTableObject.getId()));
         continue;
       }
 
@@ -128,7 +129,9 @@ public class QueryGeneratorUtils {
           .replace("{deletedFileRetentionDuration}", deletedFileRetentionDuration)
           .replace("{logRetentionDuration}", logRetentionDuration);
 
-      if ((Boolean) columnsDetailsMap.get(StringConstants.HAS_CLIENT_ID_COL)) {
+      // Handle partition columns based on catalog type and client_id presence
+      if ((Boolean) columnsDetailsMap.get(StringConstants.HAS_CLIENT_ID_COL) || 
+          (isCommonCatalog && columnsDetailsMap.containsKey(StringConstants.PARTITION_COLS_STRING))) {
         createTableQuery = createTableQuery.replace(StringConstants.PARTITION_IDENTIFIER,
             (String) columnsDetailsMap.get(StringConstants.PARTITION_COLS_STRING));
       } else {
@@ -160,7 +163,7 @@ public class QueryGeneratorUtils {
    * client ID column.
    */
   private Map<String, Object> generateTableColumns(
-      List<ColumnDefinitionModel> columnDefinitionObjects, List<String> absentRequiredFields) {
+      List<ColumnDefinitionModel> columnDefinitionObjects, List<String> absentRequiredFields, String catalog) {
     log.info("Inside generateTableColumns ");
 
     boolean firstColumn = true;
@@ -232,14 +235,23 @@ public class QueryGeneratorUtils {
       }
     }
 
+    boolean isCommonCatalog = StringConstants.COMMON_CATALOG.equalsIgnoreCase(catalog);
+    
     if (hasClientIdColumn) {//build partition col string
       partitionColumns.add(0, StringConstants.CLIENT_ID);
       String partitonString = partitionColumns.stream()
           .collect(Collectors.joining(StringConstants.COMMA_DELIMITER,
               StringConstants.PARTITION_BY_LITERAL, ")"));
       columnsDetailsMap.put(StringConstants.PARTITION_COLS_STRING, partitonString);
-    } else if (!partitionColumns.isEmpty()) {
+    } else if (!partitionColumns.isEmpty() && !isCommonCatalog) {
+      // Only flag as error if it's not a common_catalog table
       columnsDetailsMap.put(StringConstants.HAS_PARTITION_WITH_OUT_CLIENT_ID, true);
+    } else if (!partitionColumns.isEmpty() && isCommonCatalog) {
+      // For common_catalog tables, allow partition columns without client_id
+      String partitonString = partitionColumns.stream()
+          .collect(Collectors.joining(StringConstants.COMMA_DELIMITER,
+              StringConstants.PARTITION_BY_LITERAL, ")"));
+      columnsDetailsMap.put(StringConstants.PARTITION_COLS_STRING, partitonString);
     }
 
     columnsQueryBuilder.append(" )");
