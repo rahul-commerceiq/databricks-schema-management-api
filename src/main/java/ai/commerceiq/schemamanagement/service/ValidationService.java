@@ -29,21 +29,59 @@ public class ValidationService {
   @Autowired
   private DSMRepoCloningService dsmRepoCloningService;
   @Autowired
+  private PRDiffValidationService prDiffValidationService;
+  @Autowired
   private MysqlConnectionUtils mysqlConnectionUtils;
   @Autowired
   private YamlFileProcessingAndValidationUtil yamlFileProcessingAndValidationUtil;
 
   /**
-   * Validates migration files. Current Process: 1. Clones the git repo of a specific branch and
+   * Validates migration files. This method now supports both full repository cloning
+   * and PR diff-based validation for better performance.
+   *
+   * @param branchName The name of the branch to validate.
+   * @param userName The user performing the validation.
+   * @param usePRDiff Whether to use PR diff-based validation (true) or full clone (false).
+   * @param prNumber The PR number for diff-based validation (optional when usePRDiff is true).
+   * @return An ApiResponse indicating the result of the validation process.
+   */
+  public ValidateApiResponse validateFiles(String branchName, String userName, boolean usePRDiff, String prNumber) {
+    log.info("Inside validateFiles - Branch: {}, UsePRDiff: {}, PR: {}", branchName, usePRDiff, prNumber);
+    
+    if (usePRDiff) {
+      // Use the optimized PR diff approach
+      return prDiffValidationService.validateFilesWithPRDiff(branchName, userName, prNumber);
+    } else {
+      // Use the original full repository cloning approach
+      return validateFilesWithFullClone(branchName, userName);
+    }
+  }
+
+  /**
+   * Legacy method for backward compatibility. Uses full repository cloning.
+   * 
+   * @param branchName The name of the branch to validate.
+   * @param userName The user performing the validation.
+   * @return An ApiResponse indicating the result of the validation process.
+   */
+  public ValidateApiResponse validateFiles(String branchName, String userName) {
+    log.info("Inside validateFiles (legacy method) - Branch: {}", branchName);
+    return validateFilesWithFullClone(branchName, userName);
+  }
+
+  /**
+   * Validates migration files using the original full repository cloning approach.
+   * Current Process: 1. Clones the git repo of a specific branch and
    * generate and validate checksum. 2. Validates YAML files. 3. Generates and validates SQL
    * queries. 4. If validation is successful, stores the generated query and file checksum in the
    * metadata table.
    *
    * @param branchName The name of the branch to validate.
+   * @param userName The user performing the validation.
    * @return An ApiResponse indicating the result of the validation process.
    */
-  public ValidateApiResponse validateFiles(String branchName, String userName) {
-    log.info("Inside validateFiles");
+  private ValidateApiResponse validateFilesWithFullClone(String branchName, String userName) {
+    log.info("Using full repository cloning approach for validation");
     Map<Path, String> prBranchFilesChecksum = dsmRepoCloningService.cloneRepoAndGenerateFileChecksums(
         branchName);
     List<FilePathAndChecksumEntity> filesToValidate = getFilesToValidate(prBranchFilesChecksum);
@@ -78,7 +116,6 @@ public class ValidationService {
         isOverAllValidationSuccessful ? StringConstants.SUCCESS : StringConstants.FAILED);
     return response;
   }
-
 
   /**
    * Retrieves files to validate based on the provided repository file checksums.
@@ -210,12 +247,4 @@ public class ValidationService {
       throw new OldFilesUpdatedException(oldModifiedFiles);
     }
   }
-
 }
-
-
-
-
-
-
-
