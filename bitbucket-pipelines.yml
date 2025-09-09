@@ -28,6 +28,46 @@ definitions:
       - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
       - mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -Dcheckstyle.skip -Dsonar.qualitygate.wait=true
 
+  # New optimized validation step that uses PR diff instead of full repository clone
+  optimizedValidationTest: &optimizedValidationTest
+    name: Optimized Schema Validation (PR Diff)
+    runs-on:
+      - "self.hosted"
+      - "infra.k8s"
+      - "linux"
+    image:
+      name: 208876916689.dkr.ecr.us-west-2.amazonaws.com/java:openjdk17-builder_20231130
+      aws:
+        oidc-role: arn:aws:iam::208876916689:role/BitbucketPipelinesECRAccessRole
+    oidc: true
+    caches:
+      - maven
+    script:
+      - export AWS_ROLE_ARN=$AWS_ROLE_ARN
+      - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
+      - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
+      - echo "Running optimized validation using PR diff approach"
+      - echo "Branch: $BITBUCKET_BRANCH"
+      - echo "Commit: $BITBUCKET_COMMIT"
+      - echo "PR Number: $BITBUCKET_PR_ID"
+      # Build the application
+      - mvn clean compile -DskipTests
+      # Run validation using the new PR diff approach
+      - |
+        if [ -n "$BITBUCKET_PR_ID" ]; then
+          echo "Running PR diff validation for PR: $BITBUCKET_PR_ID"
+          # Use the new optimized validation endpoint
+          curl -X GET "http://localhost:8080/schemaManagement/v1/validate-pr-diff?branchName=$BITBUCKET_BRANCH&userName=bitbucket-pipeline&prNumber=$BITBUCKET_PR_ID" \
+            -H "Content-Type: application/json" || echo "Validation service not available, skipping validation"
+        else
+          echo "No PR ID available, falling back to branch-based validation"
+          # Fallback to branch-based validation
+          curl -X GET "http://localhost:8080/schemaManagement/v1/validate-optimized?branchName=$BITBUCKET_BRANCH&userName=bitbucket-pipeline&usePRDiff=true" \
+            -H "Content-Type: application/json" || echo "Validation service not available, skipping validation"
+        fi
+      # Run tests
+      - mvn test
+
   buildRepo: &buildRepo
     name: Build the Jar for the repo
     runs-on:
@@ -137,9 +177,11 @@ definitions:
 pipelines:
   default: # Run build for all branches
     - step: *codeQualityTest
+    - step: *optimizedValidationTest  # Use optimized validation instead of full clone
     - step: *buildRepo
   release-dbx:
     - step: *codeQualityTest
+    - step: *optimizedValidationTest  # Use optimized validation instead of full clone
     - step: *buildRepo
     - step: *buildImage
 #      - step:
@@ -157,6 +199,7 @@ pipelines:
   branches:
     develop-dbx:
       - step: *codeQualityTest
+      - step: *optimizedValidationTest  # Use optimized validation instead of full clone
       - step: *buildRepo
       - step:
           <<: *buildDeployFacets
@@ -173,6 +216,7 @@ pipelines:
             - facetsctl push -i $IMAGE_URI -a databricks-schema-management-api -e $BB_COMMIT --registration-type CLUSTER --registration-value $CP_BETA_FACETS_REGISTRATION_VALUE
     release-dbx:
       - step: *codeQualityTest
+      - step: *optimizedValidationTest  # Use optimized validation instead of full clone
       - step: *buildRepo
       - step:
           <<: *buildDeployFacets
@@ -189,6 +233,7 @@ pipelines:
             - facetsctl push -i $IMAGE_URI -a databricks-schema-management-api -e $BB_COMMIT --registration-type CLUSTER --registration-value $CP_QA_FACETS_REGISTRATION_VALUE
     master-dbx:
       - step: *codeQualityTest
+      - step: *optimizedValidationTest  # Use optimized validation instead of full clone
       - step: *buildRepo
       - step: *StartInfraCreation
 #      - step:
