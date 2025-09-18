@@ -46,6 +46,59 @@ definitions:
       - bash runner.sh
     artifacts:
       - target/**
+
+  validateSchemaChanges: &validateSchemaChanges
+    name: Validate Schema Changes (PR Diff Optimized)
+    runs-on:
+      - 'self.hosted'
+      - 'infra'
+      - 'linux'
+    image:
+      name: 208876916689.dkr.ecr.us-west-2.amazonaws.com/java:openjdk17-builder_20231130
+      aws:
+        oidc-role: arn:aws:iam::208876916689:role/BitbucketPipelinesECRAccessRole
+    oidc: true
+    caches:
+      - maven
+    script:
+      # Build the application first
+      - mvn clean install -DskipTests=true -Dcheckstyle.skip=true
+      # Start the application in background
+      - nohup java -jar target/databricks-schema-management-api-*.jar --server.port=8080 > app.log 2>&1 &
+      # Wait for application to start
+      - sleep 30
+      # Check if app is running
+      - curl -f http://localhost:8080/schemaManagement/v1/health || (echo "App failed to start" && cat app.log && exit 1)
+      # Run validation using PR context if available
+      - |
+        if [ "$BITBUCKET_PR_ID" != "" ]; then
+          echo "Running validation with PR context: PR $BITBUCKET_PR_ID"
+          VALIDATION_RESPONSE=$(curl -s -X GET \
+            "http://localhost:8080/schemaManagement/v1/validate-pr?branchName=$BITBUCKET_BRANCH&userName=pipeline&pullRequestId=$BITBUCKET_PR_ID" \
+            -H "Content-Type: application/json")
+        else
+          echo "Running validation with branch comparison"
+          VALIDATION_RESPONSE=$(curl -s -X GET \
+            "http://localhost:8080/schemaManagement/v1/validate-pr?branchName=$BITBUCKET_BRANCH&userName=pipeline&baseBranch=master" \
+            -H "Content-Type: application/json")
+        fi
+      # Check validation result
+      - echo "Validation Response: $VALIDATION_RESPONSE"
+      - |
+        if echo "$VALIDATION_RESPONSE" | grep -q '"status":"Success"'; then
+          echo "✅ Schema validation passed!"
+        elif echo "$VALIDATION_RESPONSE" | grep -q '"status":"Failed"'; then
+          echo "❌ Schema validation failed!"
+          exit 1
+        else
+          echo "⚠️ Unexpected validation response"
+          exit 1
+        fi
+    after-script:
+      # Stop the application and show logs
+      - pkill -f "databricks-schema-management-api" || true
+      - echo "=== Application Logs ==="
+      - cat app.log || true
   buildImage: &buildImage
     name: Build and Push Docker Image
     runs-on:
@@ -138,6 +191,11 @@ pipelines:
   default: # Run build for all branches
     - step: *codeQualityTest
     - step: *buildRepo
+  pull-requests:
+    '**': # Run for all pull requests
+      - step: *codeQualityTest
+      - step: *validateSchemaChanges  # PR diff optimized validation
+      - step: *buildRepo
   release-dbx:
     - step: *codeQualityTest
     - step: *buildRepo

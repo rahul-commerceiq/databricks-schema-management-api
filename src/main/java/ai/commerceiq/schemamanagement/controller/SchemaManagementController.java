@@ -39,10 +39,30 @@ public class SchemaManagementController {
   private DropExternalTableLocationScheduler dropExternalTableLocationScheduler;
 
   @GetMapping(value = "/validate", produces = MediaType.APPLICATION_JSON_VALUE)
-
   public ResponseEntity<Object> validate(@RequestParam String branchName,
       @RequestParam String userName) {
     ValidateApiResponse response = validationService.validateFiles(branchName, userName);
+    return ResponseEntity.ok(response);
+  }
+
+  /**
+   * Enhanced validation endpoint that supports PR context for optimized processing.
+   * This endpoint uses PR diff to process only changed files, reducing pipeline latency.
+   *
+   * @param branchName    The name of the branch to validate (required)
+   * @param userName      The user performing the validation (required)
+   * @param pullRequestId The ID of the pull request (optional - enables PR diff optimization)
+   * @param baseBranch    The base branch to compare against (optional - defaults to master)
+   * @return ResponseEntity containing the validation results
+   */
+  @GetMapping(value = "/validate-pr", produces = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<Object> validateWithPRContext(
+      @RequestParam String branchName,
+      @RequestParam String userName,
+      @RequestParam(required = false) String pullRequestId,
+      @RequestParam(required = false) String baseBranch) {
+    ValidateApiResponse response = validationService.validateFilesWithPRContext(
+        branchName, pullRequestId, baseBranch, userName);
     return ResponseEntity.ok(response);
   }
 
