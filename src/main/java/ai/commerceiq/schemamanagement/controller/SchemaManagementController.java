@@ -46,6 +46,13 @@ public class SchemaManagementController {
     return ResponseEntity.ok(response);
   }
 
+  @GetMapping(value = "/validate-pr", produces = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<Object> validatePR(@RequestParam String pullRequestId,
+      @RequestParam String userName) {
+    ValidateApiResponse response = validationService.validatePRFiles(pullRequestId, userName);
+    return ResponseEntity.ok(response);
+  }
+
   @PostMapping(value = "/migrate", produces = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<Object> migrate(@RequestParam String userName, @RequestParam String jobUrl,
       @RequestBody MigrateRequestModel migrateReqBody) {

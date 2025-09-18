@@ -138,6 +138,28 @@ pipelines:
   default: # Run build for all branches
     - step: *codeQualityTest
     - step: *buildRepo
+  pull-requests:
+    '**': # Run for all pull requests
+      - step: 
+          <<: *codeQualityTest
+          name: Code Quality Check for PR
+      - step:
+          <<: *buildRepo
+          name: Build and PR Validation
+          script:
+            - echo $BITBUCKET_CLONE_DIR
+            - bash runner.sh
+            # Add PR validation call if this is a pull request
+            - |
+              if [ -n "$BITBUCKET_PR_ID" ]; then
+                echo "Running PR-specific validation for PR ID: $BITBUCKET_PR_ID"
+                # Wait for application to start and then call the PR validation endpoint
+                nohup mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8080" &
+                sleep 30
+                curl -X GET "http://localhost:8080/schemaManagement/v1/validate-pr?pullRequestId=$BITBUCKET_PR_ID&userName=${BITBUCKET_STEP_TRIGGERER_UUID:-system}" -H "accept: application/json"
+              else
+                echo "Not a pull request - skipping PR validation"
+              fi
   release-dbx:
     - step: *codeQualityTest
     - step: *buildRepo

@@ -29,9 +29,55 @@ public class ValidationService {
   @Autowired
   private DSMRepoCloningService dsmRepoCloningService;
   @Autowired
+  private BitbucketPRService bitbucketPRService;
+  @Autowired
   private MysqlConnectionUtils mysqlConnectionUtils;
   @Autowired
   private YamlFileProcessingAndValidationUtil yamlFileProcessingAndValidationUtil;
+
+  /**
+   * Validates migration files using PR diff. Optimized Process: 1. Fetches only the changed files 
+   * in the PR using Bitbucket API. 2. Validates only the changed YAML files. 3. Generates and validates SQL
+   * queries for changed files only. 4. If validation is successful, stores the generated query and file checksum in the
+   * metadata table.
+   *
+   * @param pullRequestId The ID of the pull request to validate.
+   * @param userName The username of the person triggering validation.
+   * @return An ApiResponse indicating the result of the validation process.
+   */
+  public ValidateApiResponse validatePRFiles(String pullRequestId, String userName) {
+    log.info("Inside validatePRFiles for PR: {}", pullRequestId);
+    
+    try {
+      List<FilePathAndChecksumEntity> filesToValidate = bitbucketPRService.getPRFilesToValidate(pullRequestId);
+      
+      if (filesToValidate.isEmpty()) {
+        log.info("No files to validate in PR: {}", pullRequestId);
+        ValidateApiResponse response = new ValidateApiResponse();
+        response.setTimestamp(LocalDateTime.now());
+        response.setValidatedBy(userName);
+        response.setDetails(List.of());
+        response.setStatus(StringConstants.SUCCESS);
+        return response;
+      }
+      
+      CommonUtils.validateFilesName(filesToValidate);
+      List<FileValidationResultModel> validationResult = yamlFileProcessingAndValidationUtil.processAndValidateFiles(filesToValidate);
+      boolean isOverAllValidationSuccessful = updateMetaData(validationResult, userName);
+      ValidateApiResponse response = buildValidationResponse(validationResult, userName, isOverAllValidationSuccessful);
+      
+      log.info("ValidatePRApi response: {}", response);
+      return response;
+      
+    } catch (Exception e) {
+      log.error("Error validating PR files: {}", e.getMessage(), e);
+      ValidateApiResponse errorResponse = new ValidateApiResponse();
+      errorResponse.setTimestamp(LocalDateTime.now());
+      errorResponse.setValidatedBy(userName);
+      errorResponse.setStatus(StringConstants.FAILED);
+      return errorResponse;
+    }
+  }
 
   /**
    * Validates migration files. Current Process: 1. Clones the git repo of a specific branch and
