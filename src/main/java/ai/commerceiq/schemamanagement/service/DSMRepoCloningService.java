@@ -15,6 +15,13 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+/**
+ * Service for cloning the Databricks Schema Management repository.
+ * Note: This service performs full repository cloning and is now used as a fallback
+ * when the optimized PR diff approach (PRDiffService) is not available or fails.
+ * For better performance, the validation pipeline preferentially uses PRDiffService
+ * which processes only changed files instead of cloning the entire repository.
+ */
 @Service
 @Slf4j
 public class DSMRepoCloningService {

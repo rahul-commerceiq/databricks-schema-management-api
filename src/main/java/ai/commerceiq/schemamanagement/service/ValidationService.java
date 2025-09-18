@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 @Slf4j
@@ -29,23 +30,34 @@ public class ValidationService {
   @Autowired
   private DSMRepoCloningService dsmRepoCloningService;
   @Autowired
+  private PRDiffService prDiffService;
+  @Autowired
   private MysqlConnectionUtils mysqlConnectionUtils;
   @Autowired
   private YamlFileProcessingAndValidationUtil yamlFileProcessingAndValidationUtil;
 
+  @Value("${validation.use.pr.diff:true}")
+  private boolean usePRDiff;
+
+  @Value("${validation.fallback.to.full.clone:true}")
+  private boolean fallbackToFullClone;
+
+  @Value("${bitbucket.default.base.branch:master}")
+  private String defaultBaseBranch;
+
   /**
-   * Validates migration files. Current Process: 1. Clones the git repo of a specific branch and
-   * generate and validate checksum. 2. Validates YAML files. 3. Generates and validates SQL
-   * queries. 4. If validation is successful, stores the generated query and file checksum in the
-   * metadata table.
+   * Validates migration files. Optimized Process: 
+   * 1. If PR context is available, retrieves only changed files from PR diff
+   * 2. Falls back to full repository clone if PR diff approach fails
+   * 3. Validates YAML files and generates SQL queries
+   * 4. Stores validation results in metadata table
    *
    * @param branchName The name of the branch to validate.
    * @return An ApiResponse indicating the result of the validation process.
    */
   public ValidateApiResponse validateFiles(String branchName, String userName) {
-    log.info("Inside validateFiles");
-    Map<Path, String> prBranchFilesChecksum = dsmRepoCloningService.cloneRepoAndGenerateFileChecksums(
-        branchName);
+    log.info("Inside validateFiles for branch: {}", branchName);
+    Map<Path, String> prBranchFilesChecksum = getFileChecksums(branchName, null, null);
     List<FilePathAndChecksumEntity> filesToValidate = getFilesToValidate(prBranchFilesChecksum);
     CommonUtils.validateFilesName(filesToValidate);
     List<FileValidationResultModel> validationResult = yamlFileProcessingAndValidationUtil.processAndValidateFiles(
@@ -55,6 +67,70 @@ public class ValidationService {
         isOverAllValidationSuccessful);
     log.info("ValidateApi response: {}", response);
     return response;
+  }
+
+  /**
+   * Validates migration files with PR context for optimized processing.
+   * This method uses PR diff to process only changed files, significantly reducing pipeline latency.
+   *
+   * @param branchName    The name of the branch to validate
+   * @param pullRequestId The ID of the pull request (optional)
+   * @param baseBranch    The base branch to compare against (optional)
+   * @param userName      The user performing the validation
+   * @return An ApiResponse indicating the result of the validation process
+   */
+  public ValidateApiResponse validateFilesWithPRContext(String branchName, String pullRequestId, 
+                                                       String baseBranch, String userName) {
+    log.info("Inside validateFilesWithPRContext - branch: {}, PR: {}, base: {}", 
+        branchName, pullRequestId, baseBranch);
+    
+    Map<Path, String> prBranchFilesChecksum = getFileChecksums(branchName, pullRequestId, baseBranch);
+    List<FilePathAndChecksumEntity> filesToValidate = getFilesToValidate(prBranchFilesChecksum);
+    CommonUtils.validateFilesName(filesToValidate);
+    List<FileValidationResultModel> validationResult = yamlFileProcessingAndValidationUtil.processAndValidateFiles(
+        filesToValidate);
+    boolean isOverAllValidationSuccessful = updateMetaData(validationResult, userName);
+    ValidateApiResponse response = buildValidationResponse(validationResult, userName,
+        isOverAllValidationSuccessful);
+    log.info("ValidateApi response: {}", response);
+    return response;
+  }
+
+  /**
+   * Gets file checksums using the optimal approach based on available context.
+   * Prioritizes PR diff over full repository cloning for better performance.
+   *
+   * @param branchName    The branch name
+   * @param pullRequestId The pull request ID (optional)
+   * @param baseBranch    The base branch (optional)
+   * @return Map of file paths and their checksums
+   */
+  private Map<Path, String> getFileChecksums(String branchName, String pullRequestId, String baseBranch) {
+    if (usePRDiff) {
+      try {
+        // Attempt PR diff approach first
+        if (pullRequestId != null && !pullRequestId.trim().isEmpty()) {
+          log.info("Using PR diff approach for PR: {}", pullRequestId);
+          return prDiffService.getChangedFilesWithChecksums(pullRequestId, branchName);
+        } else if (baseBranch != null && !baseBranch.trim().isEmpty()) {
+          log.info("Using branch diff approach - comparing {} with {}", branchName, baseBranch);
+          return prDiffService.getChangedFilesWithChecksumsFromBranch(branchName, baseBranch);
+        } else {
+          log.info("Using branch diff approach with default base branch: {}", defaultBaseBranch);
+          return prDiffService.getChangedFilesWithChecksumsFromBranch(branchName, defaultBaseBranch);
+        }
+      } catch (Exception e) {
+        log.warn("PR diff approach failed: {}. Falling back to full clone if enabled.", e.getMessage());
+        if (fallbackToFullClone) {
+          return dsmRepoCloningService.cloneRepoAndGenerateFileChecksums(branchName);
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      log.info("Using full repository clone approach for branch: {}", branchName);
+      return dsmRepoCloningService.cloneRepoAndGenerateFileChecksums(branchName);
+    }
   }
 
   /**
