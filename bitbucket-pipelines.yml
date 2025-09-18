@@ -1,218 +1,94 @@
-clone:
-  depth: full    # SonarCloud scanner needs the full history to assign issues properly
-# Bitbucket Pipeline for sp-api-client
+# DTP-496: Optimized Pipeline Configuration for PR Diff Validation
+# This pipeline uses PR diff instead of full repository clone for validation
+
+image: python:3.9
+
 definitions:
   caches:
-    sonar: ~/.sonar/cache
-  services:
-    docker:
-      memory: 2048
+    pip: ~/.cache/pip
 
-  codeQualityTest: &codeQualityTest
-    name: Code Quality Check
-    runs-on:
-      - "self.hosted"
-      - "infra.k8s"
-      - "linux"
-    image:
-      name: 208876916689.dkr.ecr.us-west-2.amazonaws.com/java:openjdk17-builder_20231130
-      aws:
-        oidc-role: arn:aws:iam::208876916689:role/BitbucketPipelinesECRAccessRole
-    oidc: true
-    caches:
-      - maven
-      - sonar
-    script:
-      - export AWS_ROLE_ARN=$AWS_ROLE_ARN
-      - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
-      - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
-      - mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -Dcheckstyle.skip -Dsonar.qualitygate.wait=true
+  steps:
+    - step: &validate-schema-changes
+        name: Validate Schema Changes (PR Diff)
+        caches:
+          - pip
+        script:
+          # Install dependencies
+          - pip install -r requirements.txt
+          
+          # Set environment variables
+          - export BITBUCKET_ACCESS_TOKEN=$BITBUCKET_ACCESS_TOKEN
+          - export WORKSPACE=$BITBUCKET_WORKSPACE
+          - export REPO_SLUG=$BITBUCKET_REPO_SLUG
+          
+          # Run PR diff validation
+          - python validate_pr_diff.py --pr-id $BITBUCKET_PR_ID --workspace $WORKSPACE --repo-slug $REPO_SLUG --access-token $BITBUCKET_ACCESS_TOKEN --output validation_report.json
+          
+          # Generate human-readable report
+          - python generate_validation_report.py --input validation_report.json --output validation_summary.txt
+          
+          # Display validation summary
+          - cat validation_summary.txt
+        artifacts:
+          - validation_report.json
+          - validation_summary.txt
+        after-script:
+          # Cleanup temporary files
+          - rm -f *.tmp
 
-  buildRepo: &buildRepo
-    name: Build the Jar for the repo
-    runs-on:
-      - 'self.hosted'
-      - 'infra'
-      - 'linux'
-    image:
-      name: 208876916689.dkr.ecr.us-west-2.amazonaws.com/java:openjdk17-builder_20231130
-      aws:
-        oidc-role: arn:aws:iam::208876916689:role/BitbucketPipelinesECRAccessRole
-    oidc: true
-    caches:
-      - maven
-    script:
-      - echo $BITBUCKET_CLONE_DIR
-      - bash runner.sh
-    artifacts:
-      - target/**
-  buildImage: &buildImage
-    name: Build and Push Docker Image
-    runs-on:
-      - 'self.hosted'
-      - 'infra'
-      - 'linux'
-    image:
-      name: 208876916689.dkr.ecr.us-west-2.amazonaws.com/infra/pipelines-awscli:latest
-      aws:
-        oidc-role: arn:aws:iam::208876916689:role/BitbucketPipelinesECRAccessRole
-    oidc: true
-    caches:
-      - docker
-    size: 2x
-    services:
-      - docker
-    script:
-      - unset AWS_ACCESS_KEY_ID
-      - unset AWS_SECRET_ACCESS_KEY
-      - export AWS_REGION=us-west-2
-      - export AWS_ROLE_ARN=arn:aws:iam::208876916689:role/BitbucketPipelinesAccessRole
-      - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
-      - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
-      - export IMAGE_URI=$IMAGE_REPO:$BITBUCKET_COMMIT
-      # Login to AWS ECR
-      - echo $IMAGE_URI
-      - aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 208876916689.dkr.ecr.us-west-2.amazonaws.com
-      # Build image
-      - docker build -f Dockerfile -t $IMAGE_URI .
-      # Push image to private registry
-      - docker push $IMAGE_URI
-  buildDeployFacets: &buildDeployFacets
-    name: Build and Deploy Facets
-    image:
-      name: 208876916689.dkr.ecr.us-east-1.amazonaws.com/infra/atlassian-default:facets
-      aws:
-        oidc-role: arn:aws:iam::208876916689:role/BitbucketPipelinesECRAccessRole
-    oidc: true
-    size: 2x
-    services:
-      - docker
-  deployApp: &deployApp
-    name: Deploy app into k8s
-    image:
-      name: 208876916689.dkr.ecr.us-west-2.amazonaws.com/astra
-      aws:
-        oidc-role: arn:aws:iam::208876916689:role/BitbucketPipelinesECRAccessRole
-    oidc: true
-    services:
-      - docker
-    caches:
-      - docker
-    deployment: test
-    script:
-      - echo "astra deployment"
-  deployInfra: &deployInfra
-    name: Deploy Infra on AWS
-    runs-on:
-      - 'self.hosted'
-      - 'terraform'
-      - 'linux'
-    image:
-      name: 208876916689.dkr.ecr.us-west-2.amazonaws.com/terragrunt
-      aws:
-        oidc-role: arn:aws:iam::208876916689:role/BitbucketPipelinesECRAccessRole
-    oidc: true
-    services:
-      - docker
-    caches:
-      - docker
-    size: 2x
-    script:
-      - unset AWS_ACCESS_KEY_ID
-      - unset AWS_SECRET_ACCESS_KEY
-      - export AWS_REGION=us-west-2
-      - export AWS_ROLE_ARN=arn:aws:iam::208876916689:role/BitbucketPipelinesAccessRole
-      - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
-      - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
-      - cd infrastructure
-      - cp configs/beta-dbx/commons.hcl .
-      - terragrunt run-all plan --terragrunt-source-update
-
-  StartInfraCreation: &StartInfraCreation
-    name: Start Infra Creation
-    image: atlassian/pipelines-awscli
-    script:
-      - echo "running terragrunt apply"
+    - step: &validate-schema-changes-legacy
+        name: Validate Schema Changes (Legacy - Full Clone)
+        caches:
+          - pip
+        script:
+          # Fallback to full repository clone if PR diff validation fails
+          - git clone https://$BITBUCKET_ACCESS_TOKEN@bitbucket.org/$BITBUCKET_WORKSPACE/$BITBUCKET_REPO_SLUG.git .
+          - pip install -r requirements.txt
+          - python validate_all_yaml_files.py --workspace $BITBUCKET_WORKSPACE --repo-slug $BITBUCKET_REPO_SLUG
+        artifacts:
+          - validation_report.json
 
 pipelines:
-  default: # Run build for all branches
-    - step: *codeQualityTest
-    - step: *buildRepo
-  release-dbx:
-    - step: *codeQualityTest
-    - step: *buildRepo
-    - step: *buildImage
-#      - step:
-#          <<: *deployInfra
-#          script:
-#            - unset AWS_ACCESS_KEY_ID
-#            - unset AWS_SECRET_ACCESS_KEY
-#            - export AWS_REGION=us-west-2
-#            - export AWS_ROLE_ARN=arn:aws:iam::208876916689:role/BitbucketPipelinesAccessRole
-#            - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
-#            - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
-#            - cd infrastructure
-#            - cp configs/prod/commons.hcl .
-#            - terragrunt run-all plan --terragrunt-source-update
+  pull-requests:
+    '**':
+      - step: *validate-schema-changes
+      - step:
+          name: Fallback Validation (if needed)
+          condition:
+            changes:
+              includePaths:
+                - "**/*.yaml"
+                - "**/*.yml"
+          script:
+            - echo "Running fallback validation for YAML changes"
+            - python validate_pr_diff.py --pr-id $BITBUCKET_PR_ID --workspace $BITBUCKET_WORKSPACE --repo-slug $BITBUCKET_REPO_SLUG --access-token $BITBUCKET_ACCESS_TOKEN --output fallback_validation_report.json
+            - python generate_validation_report.py --input fallback_validation_report.json --output fallback_summary.txt
+            - cat fallback_summary.txt
+          artifacts:
+            - fallback_validation_report.json
+            - fallback_summary.txt
+
   branches:
-    develop-dbx:
-      - step: *codeQualityTest
-      - step: *buildRepo
+    main:
       - step:
-          <<: *buildDeployFacets
+          name: Full Repository Validation
+          caches:
+            - pip
           script:
-            - export AWS_ROLE_ARN=arn:aws:iam::208876916689:role/BitbucketPipelinesAccessRole
-            - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
-            - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
-            - export BB_COMMIT=$(echo $BITBUCKET_COMMIT | cut -c1-8)
-            - export IMAGE_URI=$IMAGE_REPO:$BITBUCKET_COMMIT
-            - echo $IMAGE_URI
-            - eval $(aws ecr get-login --region us-west-2 --no-include-email)
-            - docker build -t "$IMAGE_URI" .
-            - facetsctl login -u ops@commerceiq.ai -t $FACETS_TOKEN  -c https://commerceiq-cp.console.facets.cloud
-            - facetsctl push -i $IMAGE_URI -a databricks-schema-management-api -e $BB_COMMIT --registration-type CLUSTER --registration-value $CP_BETA_FACETS_REGISTRATION_VALUE
-    release-dbx:
-      - step: *codeQualityTest
-      - step: *buildRepo
+            - git clone https://$BITBUCKET_ACCESS_TOKEN@bitbucket.org/$BITBUCKET_WORKSPACE/$BITBUCKET_REPO_SLUG.git .
+            - pip install -r requirements.txt
+            - python validate_all_yaml_files.py --workspace $BITBUCKET_WORKSPACE --repo-slug $BITBUCKET_REPO_SLUG
+          artifacts:
+            - validation_report.json
+
+  custom:
+    performance-test:
       - step:
-          <<: *buildDeployFacets
+          name: Performance Testing
+          caches:
+            - pip
           script:
-            - export AWS_ROLE_ARN=arn:aws:iam::208876916689:role/BitbucketPipelinesAccessRole
-            - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
-            - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
-            - export BB_COMMIT=$(echo $BITBUCKET_COMMIT | cut -c1-8)
-            - export IMAGE_URI=$IMAGE_REPO:$BITBUCKET_COMMIT
-            - echo $IMAGE_URI
-            - eval $(aws ecr get-login --region us-west-2 --no-include-email)
-            - docker build -t "$IMAGE_URI" .
-            - facetsctl login -u ops@commerceiq.ai -t $FACETS_TOKEN  -c https://commerceiq-cp.console.facets.cloud
-            - facetsctl push -i $IMAGE_URI -a databricks-schema-management-api -e $BB_COMMIT --registration-type CLUSTER --registration-value $CP_QA_FACETS_REGISTRATION_VALUE
-    master-dbx:
-      - step: *codeQualityTest
-      - step: *buildRepo
-      - step: *StartInfraCreation
-#      - step:
-#          <<: *deployInfra
-#          trigger: manual
-#          deployment: prod
-#          script:
-#            - export AWS_ROLE_ARN=arn:aws:iam::208876916689:role/BitbucketPipelinesAccessRole
-#            - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
-#            - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
-#            - cd infrastructure
-#            - cp configs/prod/commons.hcl .
-#            - terragrunt run-all apply --terragrunt-non-interactive --terragrunt-source-update
-      - step:
-          step: *codeQualityTest
-          <<: *buildDeployFacets
-          script:
-            - export AWS_ROLE_ARN=arn:aws:iam::208876916689:role/BitbucketPipelinesAccessRole
-            - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
-            - echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token
-            - export BB_COMMIT=$(echo $BITBUCKET_COMMIT | cut -c1-8)
-            - export IMAGE_URI=$IMAGE_REPO:$BITBUCKET_COMMIT
-            - echo $IMAGE_URI
-            - eval $(aws ecr get-login --region us-west-2 --no-include-email)
-            - docker build -t "$IMAGE_URI" .
-            - facetsctl login -u ops@commerceiq.ai -t $FACETS_TOKEN  -c https://commerceiq-cp.console.facets.cloud
-            - facetsctl push -i $IMAGE_URI -a databricks-schema-management-api -e $BB_COMMIT --registration-type CLUSTER --registration-value $CP_PROD_FACETS_REGISTRATION_VALUE
+            - pip install -r requirements.txt
+            - python performance_test.py --workspace $BITBUCKET_WORKSPACE --repo-slug $BITBUCKET_REPO_SLUG --access-token $BITBUCKET_ACCESS_TOKEN
+          artifacts:
+            - performance_report.json
